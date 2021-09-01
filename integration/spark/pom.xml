@@ -94,6 +94,18 @@
       <version>${project.version}</version>
       <exclusions>
         <exclusion>
+          <groupId>com.fasterxml.jackson.core</groupId>
+          <artifactId>jackson-annotations</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>com.fasterxml.jackson.core</groupId>
+          <artifactId>jackson-core</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>com.fasterxml.jackson.core</groupId>
+          <artifactId>jackson-databind</artifactId>
+        </exclusion>
+        <exclusion>
           <groupId>org.apache.commons</groupId>
           <artifactId>*</artifactId>
         </exclusion>
@@ -106,6 +118,16 @@
           <artifactId>*</artifactId>
         </exclusion>
       </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>com.beust</groupId>
+      <artifactId>jcommander</artifactId>
+      <version>1.72</version>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-annotations</artifactId>
+      <version>${dep.jackson.version}</version>
     </dependency>
     <dependency>
       <groupId>org.apache.carbondata</groupId>
@@ -176,8 +198,62 @@
     <!-- spark -->
     <dependency>
       <groupId>org.apache.spark</groupId>
+      <artifactId>spark-streaming_${scala.binary.version}</artifactId>
+      <version>${spark.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
+      <artifactId>spark-streaming-kafka-0-10_${scala.binary.version}</artifactId>
+      <version>${spark.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.confluent</groupId>
+      <artifactId>kafka-avro-serializer</artifactId>
+      <version>5.3.4</version>
+    </dependency>
+    <dependency>
+      <groupId>io.confluent</groupId>
+      <artifactId>common-config</artifactId>
+      <version>5.3.4</version>
+    </dependency>
+    <dependency>
+      <groupId>io.confluent</groupId>
+      <artifactId>common-utils</artifactId>
+      <version>5.3.4</version>
+    </dependency>
+    <dependency>
+      <groupId>io.confluent</groupId>
+      <artifactId>kafka-schema-registry-client</artifactId>
+      <version>5.3.4</version>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.spark</groupId>
       <artifactId>spark-hive-thriftserver_${scala.binary.version}</artifactId>
       <exclusions>
+<!--        <exclusion>-->
+<!--          <groupId>org.apache.spark</groupId>-->
+<!--          <artifactId>spark-hive_2.11</artifactId>-->
+<!--        </exclusion>-->
+<!--        <exclusion>-->
+<!--          <groupId>org.spark-project.hive</groupId>-->
+<!--          <artifactId>hive-exec</artifactId>-->
+<!--        </exclusion>-->
+<!--        <exclusion>-->
+<!--          <groupId>org.spark-project.hive</groupId>-->
+<!--          <artifactId>hive-metastore</artifactId>-->
+<!--        </exclusion>-->
+<!--        <exclusion>-->
+<!--          <groupId>org.spark-project.hive</groupId>-->
+<!--          <artifactId>hive-jdbc</artifactId>-->
+<!--        </exclusion>-->
+<!--        <exclusion>-->
+<!--          <groupId>org.spark-project.hive</groupId>-->
+<!--          <artifactId>hive-cli</artifactId>-->
+<!--        </exclusion>-->
+<!--        <exclusion>-->
+<!--          <groupId>org.spark-project.hive</groupId>-->
+<!--          <artifactId>hive-beeline</artifactId>-->
+<!--        </exclusion>-->
         <exclusion>
           <groupId>com.twitter</groupId>
           <artifactId>chill-java</artifactId>

@@ -56,6 +56,19 @@ class MergeTestCase extends QueryTest with BeforeAndAfterAll {
       }.toDF("id", "name", "c_name", "quantity", "price", "state")
   }
 
+  test("sss") {
+    import sqlContext.implicits._
+    val  a = sqlContext.sparkContext.parallelize(1 to 3, 4)
+      .map { x => ("id" + x, s"order$x")
+      }.toDF("id", "name").rdd
+
+    val schema = new StructType().add(StructField("name", StringType))
+      .add(StructField("orders", StringType))
+      .add(StructField("newcol", StringType))
+
+    val b = sqlContext.createDataFrame(a, schema)
+  }
+
   def generateFullCDC(
       numOrders: Int,
       numUpdatedOrders: Int,
