@@ -124,11 +124,11 @@ object SparkStreamingExample {
   def showTableCount(spark: SparkSession, tableName: String): Thread = {
     val thread = new Thread() {
       override def run(): Unit = {
-        for (_ <- 0 to 1000) {
+        for (_ <- 0 to 1) {
           println(System.currentTimeMillis())
           spark.sql(s"select count(*) from $tableName").show(truncate = false)
           spark.sql(s"SHOW SEGMENTS FOR TABLE ${tableName}").show(false)
-          Thread.sleep(1000 * 5)
+          Thread.sleep(10 * 5)
         }
       }
     }
@@ -169,14 +169,21 @@ object SparkStreamingExample {
         println(System.currentTimeMillis().toString() +
           " at batch time: " + time.toString() +
           " the count of received data: " + df.count())
+        print("********************** rdd is: " + rdd.toString())
+        throw new Exception("test")
         CarbonSparkStreamingFactory.getStreamSparkStreamingWriter(spark, "default", tableName)
           .mode(SaveMode.Append)
           .writeStreamData(df, time)
+        print("x")
       }}
     } catch {
       case ex: Exception =>
         ex.printStackTrace()
         println("Done reading and writing streaming data")
+        ssc.stop()
+    } finally {
+      println("&&&&&&&&&&&&&&&&&&")
+      ssc.stop()
     }
     ssc
   }
@@ -188,9 +195,9 @@ object SparkStreamingExample {
         val clientSocket = serverSocket.accept()
         val socketWriter = new PrintWriter(clientSocket.getOutputStream())
         var index = 0
-        for (_ <- 1 to 1000) {
+        for (_ <- 1 to 100) {
           // write 5 records per iteration
-          for (_ <- 0 to 100) {
+          for (_ <- 0 to 10) {
             index = index + 1
             socketWriter.println(index.toString + ",name_" + index
                                  + ",city_" + index + "," + (index * 10000.00).toString +

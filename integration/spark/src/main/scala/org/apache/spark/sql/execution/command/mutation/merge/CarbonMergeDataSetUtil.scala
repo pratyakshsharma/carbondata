@@ -29,6 +29,7 @@ import org.apache.spark.sql.execution.CastExpressionOptimization
 import org.apache.spark.sql.optimizer.CarbonFilters
 import org.apache.spark.sql.types.DateType
 
+import org.apache.carbondata.common.exceptions.sql.MalformedCarbonCommandException
 import org.apache.carbondata.core.constants.CarbonCommonConstants
 import org.apache.carbondata.core.index.{IndexChooser, IndexInputFormat, IndexStoreManager, IndexUtil}
 import org.apache.carbondata.core.indexstore.PartitionSpec
