@@ -105,6 +105,19 @@ case class CarbonMergeDataSetCommand(
     }
     // Target dataset must be backed by carbondata table.
     val targetCarbonTable = relations.head.carbonRelation.carbonTable
+
+    val properties = CarbonProperties.getInstance()
+    val isSchemaEnforcementEnabled = properties
+      .getProperty(CarbonCommonConstants.CARBON_ENABLE_SCHEMA_ENFORCEMENT,
+        CarbonCommonConstants.CARBON_ENABLE_SCHEMA_ENFORCEMENT_DEFAULT).toBoolean
+    if (isSchemaEnforcementEnabled) {
+      // call the util function to verify if incoming schema matches with target schema
+      CarbonMergeDataSetUtil.verifySourceAndTargetSchemas(targetDsOri, srcDS)
+    } else {
+      // TODO: add a flag
+      CarbonMergeDataSetUtil.handleSchemaEvolutionForCarbonStreamer(
+        targetDsOri, srcDS, sparkSession)
+    }
     // select only the required columns, it can avoid lot of and shuffling.
     val targetDs = if (mergeMatches == null && operationType != null) {
       targetDsOri.select(keyColumn)
@@ -145,21 +158,37 @@ case class CarbonMergeDataSetCommand(
     // repartition the srsDs, if the target has bucketing and the bucketing columns contains join
     // columns
     val repartitionedSrcDs =
-      if (targetCarbonTable.getBucketingInfo != null &&
-          targetCarbonTable.getBucketingInfo
-            .getListOfColumns
-            .asScala
-            .map(_.getColumnName).containsSlice(joinColumns)) {
-        srcDS.repartition(targetCarbonTable.getBucketingInfo.getNumOfRanges,
-          joinColumns.map(srcDS.col): _*)
-      } else {
+    if (targetCarbonTable.getBucketingInfo != null &&
+        targetCarbonTable.getBucketingInfo
+          .getListOfColumns
+          .asScala
+          .map(_.getColumnName).containsSlice(joinColumns)) {
+      srcDS.repartition(targetCarbonTable.getBucketingInfo.getNumOfRanges,
+        joinColumns.map(srcDS.col): _*)
+    } else {
       srcDS
-      }
+    }
+
+    // deduplicate the incoming dataset
+    // TODO: handle the case for partial updates
+    val orderingField = properties.getProperty(CarbonCommonConstants.CARBON_STREAMER_SOURCE_ORDERING_FIELD)
+    val deduplicatedSrcDs = if (keyColumn != null) {
+      CarbonMergeDataSetUtil.deduplicateBeforeWriting(repartitionedSrcDs,
+        targetDs,
+        sparkSession,
+        sourceAliasName,
+        targetDsAliasName,
+        keyColumn,
+        orderingField,
+        targetCarbonTable)
+    } else {
+      repartitionedSrcDs
+    }
 
     // cache the source data as we will be scanning multiple times
-    repartitionedSrcDs.cache()
-    val deDuplicatedRecords = repartitionedSrcDs.count()
-    LOGGER.info(s"Number of records from source data: $deDuplicatedRecords")
+    deduplicatedSrcDs.cache()
+    val repartitionedRecords = deduplicatedSrcDs.count()
+    LOGGER.info(s"Number of records from source data: $repartitionedRecords")
     // Create accumulators to log the stats
     val stats = Stats(createLongAccumulator("insertedRows"),
       createLongAccumulator("updatedRows"),
@@ -169,7 +198,7 @@ case class CarbonMergeDataSetCommand(
     // the pruning will happen when the join type is not full_outer, in case of full_outer,
     // we will be needing all the records from left table which is target table, so no need to prune
     // target table based on min max of source table.
-    val isMinMaxPruningEnabled = CarbonProperties.getInstance()
+    val isMinMaxPruningEnabled = properties
       .getProperty(CarbonCommonConstants.CARBON_CDC_MINMAX_PRUNING_ENABLED,
         CarbonCommonConstants.CARBON_CDC_MINMAX_PRUNING_ENABLED_DEFAULT).toBoolean
     var didNotPrune = false
@@ -223,10 +252,10 @@ case class CarbonMergeDataSetCommand(
         // get the splits required, which will also load the cache based on the configuration either
         // in index server or driver
         val columnMinMaxInBlocklet: util.LinkedHashMap[String, util.List[FilePathMinMaxVO]] =
-          new util.LinkedHashMap[String, util.List[FilePathMinMaxVO]]
+        new util.LinkedHashMap[String, util.List[FilePathMinMaxVO]]
         val colToSplitsFilePathAndMinMaxMap: mutable.Map[String, util.List[FilePathMinMaxVO]] =
           CarbonMergeDataSetUtil.getSplitsAndLoadToCache(targetCarbonTable,
-            repartitionedSrcDs,
+            deduplicatedSrcDs,
             columnMinMaxInBlocklet,
             columnToIndexMap,
             sparkSession)
@@ -286,7 +315,7 @@ case class CarbonMergeDataSetCommand(
         // find the file paths to scan.
         finalCarbonFilesToScan = CarbonMergeDataSetUtil.getFilesToScan(joinCarbonColumns,
           joinColumnToTreeMapping,
-          repartitionedSrcDs)
+          deduplicatedSrcDs)
 
         LOGGER.info(s"Finished min-max pruning. Carbondata files to scan during merge is: ${
           finalCarbonFilesToScan.length}")
@@ -303,7 +332,7 @@ case class CarbonMergeDataSetCommand(
           targetDs
             .withColumn(CarbonCommonConstants.CARBON_IMPLICIT_COLUMN_TUPLEID, expr("getTupleId()"))
             .where(s"getBlockPaths('${finalCarbonFilesToScan.mkString(",")}')")
-            .join(repartitionedSrcDs.select(keyColumn),
+            .join(deduplicatedSrcDs.select(keyColumn),
               expr(s"$targetDsAliasName.$keyColumn = $sourceAliasName.$keyColumn"),
               joinType)
         } else {
@@ -313,7 +342,7 @@ case class CarbonMergeDataSetCommand(
         if (!isInsertOperation) {
           targetDs
             .withColumn(CarbonCommonConstants.CARBON_IMPLICIT_COLUMN_TUPLEID, expr("getTupleId()"))
-            .join(repartitionedSrcDs.select(keyColumn),
+            .join(deduplicatedSrcDs.select(keyColumn),
               expr(s"$targetDsAliasName.$keyColumn = $sourceAliasName.$keyColumn"),
               joinType)
         } else {
@@ -322,14 +351,14 @@ case class CarbonMergeDataSetCommand(
       }
       val mergeHandler: MergeHandler =
         MergeOperationType.withName(operationType.toUpperCase) match {
-        case MergeOperationType.UPSERT =>
-          UpsertHandler(sparkSession, frame, targetCarbonTable, stats, repartitionedSrcDs)
-        case MergeOperationType.UPDATE =>
-          UpdateHandler(sparkSession, frame, targetCarbonTable, stats, repartitionedSrcDs)
-        case MergeOperationType.DELETE =>
-          DeleteHandler(sparkSession, frame, targetCarbonTable, stats, repartitionedSrcDs)
-        case MergeOperationType.INSERT =>
-          InsertHandler(sparkSession, frame, targetCarbonTable, stats, repartitionedSrcDs)
+          case MergeOperationType.UPSERT =>
+            UpsertHandler(sparkSession, frame, targetCarbonTable, stats, deduplicatedSrcDs)
+          case MergeOperationType.UPDATE =>
+            UpdateHandler(sparkSession, frame, targetCarbonTable, stats, deduplicatedSrcDs)
+          case MergeOperationType.DELETE =>
+            DeleteHandler(sparkSession, frame, targetCarbonTable, stats, deduplicatedSrcDs)
+          case MergeOperationType.INSERT =>
+            InsertHandler(sparkSession, frame, targetCarbonTable, stats, deduplicatedSrcDs)
         }
 
       // execute merge handler
@@ -337,7 +366,7 @@ case class CarbonMergeDataSetCommand(
       LOGGER.info(
         " Time taken to merge data  :: " + (System.currentTimeMillis() - st))
       // clear the cached src
-      repartitionedSrcDs.unpersist()
+      deduplicatedSrcDs.unpersist()
       return Seq()
     }
     // validate the merge matches and actions.
@@ -359,7 +388,7 @@ case class CarbonMergeDataSetCommand(
         .withColumn(CarbonCommonConstants.CARBON_IMPLICIT_COLUMN_TUPLEID, expr("getTupleId()"))
         .withColumn("exist_on_target", lit(1))
         .where(s"getBlockPaths('${finalCarbonFilesToScan.mkString(",")}')")
-        .join(repartitionedSrcDs.withColumn("exist_on_src", lit(1)),
+        .join(deduplicatedSrcDs.withColumn("exist_on_src", lit(1)),
           mergeMatches.joinExpr,
           joinType)
         .withColumn(status_on_mergeds, condition)
@@ -367,7 +396,7 @@ case class CarbonMergeDataSetCommand(
       targetDs
         .withColumn(CarbonCommonConstants.CARBON_IMPLICIT_COLUMN_TUPLEID, expr("getTupleId()"))
         .withColumn("exist_on_target", lit(1))
-        .join(repartitionedSrcDs.withColumn("exist_on_src", lit(1)),
+        .join(deduplicatedSrcDs.withColumn("exist_on_src", lit(1)),
           mergeMatches.joinExpr,
           joinType)
         .withColumn(status_on_mergeds, condition)
@@ -456,7 +485,7 @@ case class CarbonMergeDataSetCommand(
     HorizontalCompaction.tryHorizontalCompaction(
       sparkSession, targetCarbonTable)
     // clear the cached src
-    repartitionedSrcDs.unpersist()
+    deduplicatedSrcDs.unpersist()
     Seq.empty
   }
 
@@ -529,75 +558,75 @@ case class CarbonMergeDataSetCommand(
       val writer = factory.newInstance(path + CarbonCommonConstants.FILE_SEPARATOR + task.toString,
         schema, context)
       val projLen = projections.length
-        new Iterator[InternalRow] {
-          val queue = new util.LinkedList[InternalRow]()
+      new Iterator[InternalRow] {
+        val queue = new util.LinkedList[InternalRow]()
 
-          override def hasNext: Boolean = {
-            if (!queue.isEmpty || iter.hasNext) {
-              true
-            } else {
-              writer.close()
-              false
-            }
-          }
-
-          override def next(): InternalRow = {
-            if (!queue.isEmpty) {
-              return queue.poll()
-            }
-            val row = iter.next()
-            val is = CarbonToSparkAdapter.evaluateWithPredicate(expr,
-              colSchemaWithoutStatusCol, row)
-            var isUpdate = false
-            var isDelete = false
-            var insertedCount = 0
-            if (is != null) {
-              val isInt = is.asInstanceOf[Int]
-              var i = 0
-              while (i < projLen) {
-                if ((isInt & (1 << i)) == (1 << i)) {
-                  projections(i).foreach { p =>
-                    if (!p.isDelete) {
-                      if (p.isUpdate) {
-                        isUpdate = p.isUpdate
-                      }
-                      queue.add(p.getInternalRowFromIndex(row, is.asInstanceOf[Int]))
-                      insertedCount += 1
-                    } else {
-                      isDelete = true
-                    }
-                  }
-                }
-                i = i + 1
-              }
-            }
-            val newArray = new Array[Any](2)
-            newArray(0) = row.getUTF8String(tupleId)
-            if (isUpdate && isDelete) {
-              newArray(1) = 102
-              writer.write(new GenericInternalRow(newArray))
-              updatedRows.add(1)
-              deletedRows.add(1)
-              insertedCount -= 1
-            } else if (isUpdate) {
-              updatedRows.add(1)
-              newArray(1) = 101
-              insertedCount -= 1
-              writer.write(new GenericInternalRow(newArray))
-            } else if (isDelete) {
-              newArray(1) = 100
-              deletedRows.add(1)
-              writer.write(new GenericInternalRow(newArray))
-            }
-            insertedRows.add(insertedCount)
-            if (!queue.isEmpty) {
-              queue.poll()
-            } else {
-              val values = new Array[Any](targetSchema.length)
-              new GenericInternalRow(values)
-            }
+        override def hasNext: Boolean = {
+          if (!queue.isEmpty || iter.hasNext) {
+            true
+          } else {
+            writer.close()
+            false
           }
         }
+
+        override def next(): InternalRow = {
+          if (!queue.isEmpty) {
+            return queue.poll()
+          }
+          val row = iter.next()
+          val is = CarbonToSparkAdapter.evaluateWithPredicate(expr,
+            colSchemaWithoutStatusCol, row)
+          var isUpdate = false
+          var isDelete = false
+          var insertedCount = 0
+          if (is != null) {
+            val isInt = is.asInstanceOf[Int]
+            var i = 0
+            while (i < projLen) {
+              if ((isInt & (1 << i)) == (1 << i)) {
+                projections(i).foreach { p =>
+                  if (!p.isDelete) {
+                    if (p.isUpdate) {
+                      isUpdate = p.isUpdate
+                    }
+                    queue.add(p.getInternalRowFromIndex(row, is.asInstanceOf[Int]))
+                    insertedCount += 1
+                  } else {
+                    isDelete = true
+                  }
+                }
+              }
+              i = i + 1
+            }
+          }
+          val newArray = new Array[Any](2)
+          newArray(0) = row.getUTF8String(tupleId)
+          if (isUpdate && isDelete) {
+            newArray(1) = 102
+            writer.write(new GenericInternalRow(newArray))
+            updatedRows.add(1)
+            deletedRows.add(1)
+            insertedCount -= 1
+          } else if (isUpdate) {
+            updatedRows.add(1)
+            newArray(1) = 101
+            insertedCount -= 1
+            writer.write(new GenericInternalRow(newArray))
+          } else if (isDelete) {
+            newArray(1) = 100
+            deletedRows.add(1)
+            writer.write(new GenericInternalRow(newArray))
+          }
+          insertedRows.add(insertedCount)
+          if (!queue.isEmpty) {
+            queue.poll()
+          } else {
+            val values = new Array[Any](targetSchema.length)
+            new GenericInternalRow(values)
+          }
+        }
+      }
     }.filter { row => !row.isNullAt(targetSchema.length - 1)}, path)
   }
 
@@ -605,7 +634,7 @@ case class CarbonMergeDataSetCommand(
     val acc = new LongAccumulator
     acc.setValue(0)
     acc.metadata = AccumulatorMetadata(AccumulatorContext.newId(), Some(name), countFailedValues
-      = false)
+    = false)
     AccumulatorContext.register(acc)
     acc
   }
@@ -807,7 +836,7 @@ case class CarbonMergeDataSetCommand(
         if (!(f.getActions.exists(_.isInstanceOf[UpdateAction]) ||
               f.getActions.exists(_.isInstanceOf[DeleteAction]))) {
           throw new AnalysisException("For inserting to history table, " +
-                              "it should be along with either update or delete action")
+                                      "it should be along with either update or delete action")
         }
         val value = f.getActions.find(_.isInstanceOf[InsertInHistoryTableAction]).get.
           asInstanceOf[InsertInHistoryTableAction]

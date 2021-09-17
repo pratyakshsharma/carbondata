@@ -1208,12 +1208,23 @@ public final class  CarbonCommonConstants {
   public static final int CARBON_LOCAL_DICTIONARY_SIZE_THRESHOLD_IN_MB_MAX = 16;
 
   /**
-  * by default, disable the bad record and converter during "insert into"
-  */
+   * by default, disable the bad record and converter during "insert into"
+   */
   public static final String CARBON_ENABLE_BAD_RECORD_HANDLING_FOR_INSERT =
       "carbon.enable.bad.record.handling.for.insert";
 
   public static final String CARBON_ENABLE_BAD_RECORD_HANDLING_FOR_INSERT_DEFAULT = "false";
+
+  /**
+   * This flag decides if table schema needs to change as per the incoming batch schema.
+   * If set to true, incoming schema will be validated with existing table schema.
+   * If the schema has evolved, the incoming batch cannot be ingested and
+   * job will simply fail.
+   */
+  @CarbonProperty
+  public static final String CARBON_ENABLE_SCHEMA_ENFORCEMENT = "carbon.enable.schema.enforcement";
+
+  public static final String CARBON_ENABLE_SCHEMA_ENFORCEMENT_DEFAULT = "true";
 
   //////////////////////////////////////////////////////////////////////////////////////////
   // Query parameter start here
@@ -1304,7 +1315,7 @@ public final class  CarbonCommonConstants {
    */
   @CarbonProperty
   public static final String CARBON_EXECUTOR_LRU_CACHE_PERCENT =
-          "carbon.executor.lru.cache.percent";
+      "carbon.executor.lru.cache.percent";
 
   /**
    * when executor LRU cache is not configured, set it to 70% percent of executor memory size
@@ -2362,7 +2373,7 @@ public final class  CarbonCommonConstants {
    * Configured property to enable/disable prepriming in index server
    */
   public static final String CARBON_INDEXSEVER_ENABLE_PREPRIMING =
-          "carbon.indexserver.enable.prepriming";
+      "carbon.indexserver.enable.prepriming";
 
   /**
    * Property is used to enable/disable fallback for indexserver.
@@ -2412,7 +2423,7 @@ public final class  CarbonCommonConstants {
   public static final String LOAD_SYNC_TIME = "load_sync_time";
 
   public static final String CARBON_INDEX_SERVER_JOBNAME_LENGTH =
-          "carbon.index.server.max.jobname.length";
+      "carbon.index.server.max.jobname.length";
 
   public static final String CARBON_INDEX_SERVER_JOBNAME_LENGTH_DEFAULT = "50";
 
@@ -2592,7 +2603,7 @@ public final class  CarbonCommonConstants {
    */
   @CarbonProperty
   public static final String CARBON_INDEXSERVER_TEMPFOLDER_DELETETIME =
-          "carbon.indexserver.tempfolder.deletetime";
+      "carbon.indexserver.tempfolder.deletetime";
 
   /**
    * index server temp folder aging period default value 3hours.
@@ -2610,7 +2621,7 @@ public final class  CarbonCommonConstants {
    * the table may fail with NullPointerException.
    */
   public static final String CARBON_METACACHE_EXPIRATION_TIME_IN_SECONDS =
-        "carbon.metacache.expiration.seconds";
+      "carbon.metacache.expiration.seconds";
 
   /**
    * By default, the cache in CarbonMetadata will not be expired by time.
