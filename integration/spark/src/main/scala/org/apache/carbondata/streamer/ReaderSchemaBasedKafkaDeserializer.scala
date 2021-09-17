@@ -23,8 +23,13 @@ import org.apache.avro.Schema
 
 import org.apache.carbondata.core.constants.CarbonCommonConstants
 
+/**
+ * A kafka avro deserializer which has to cofigured when the kafka has avro records and the
+ * schema is present in the schema registry.
+ */
 case class ReaderSchemaBasedKafkaDeserializer() extends KafkaAvroDeserializer {
 
+  // read schema extracted from schema registry.
   var readSchema: Schema = _
 
   override def configure(configs: util.Map[String, _],
@@ -35,6 +40,11 @@ case class ReaderSchemaBasedKafkaDeserializer() extends KafkaAvroDeserializer {
       .asInstanceOf[String])
   }
 
+  /**
+   * Provide the read schema during deserialize, so that the schema evolution part is take care
+   * and after deserialize data will be returned with the default values added to columns not
+   * present in the actual data, but present in reader schema.
+   */
   override def deserialize(includeSchemaAndVersion: Boolean,
       topic: String,
       isKey: lang.Boolean,

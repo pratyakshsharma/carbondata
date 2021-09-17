@@ -20,7 +20,7 @@ package org.apache.carbondata.examples
 import java.io.File
 
 import org.apache.log4j.PropertyConfigurator
-import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.{SaveMode, SparkSession}
 
 import org.apache.carbondata.core.constants.CarbonCommonConstants
 import org.apache.carbondata.core.util.CarbonProperties
@@ -41,10 +41,10 @@ object CarbonSessionExample {
     val spark = ExampleUtils.createCarbonSession("CarbonSessionExample")
     spark.sparkContext.setLogLevel("error")
     Seq(
-      "stored as carbondata",
-      "using carbondata",
-      "stored by 'carbondata'",
-      "stored by 'org.apache.carbondata.format'"
+      "stored as carbondata"
+//      "using carbondata",
+//      "stored by 'carbondata'",
+//      "stored by 'org.apache.carbondata.format'"
     ).foreach { formatSyntax =>
       exampleBody(spark, formatSyntax)
     }
@@ -53,95 +53,24 @@ object CarbonSessionExample {
 
   def exampleBody(spark : SparkSession, formatSyntax: String = "stored as carbondata"): Unit = {
 
-    val rootPath = new File(this.getClass.getResource("/").getPath
-                            + "../../../..").getCanonicalPath
+    import scala.util.Random
 
-    spark.sql("DROP TABLE IF EXISTS source")
+    import spark.implicits._
+    val r = new Random()
+    val df = spark.sparkContext.parallelize(1 to 2)
+      .map(x => ("akash" + x, BigDecimal.apply(x % 60), 3000))
+      .toDF("name", "age", "salary")
+    df.write.format("avro").save("/home/root1/Projects/avrodata")
 
-    // Create table
-    spark.sql(
-      s"""
-         | CREATE TABLE source(
-         | shortField SHORT,
-         | intField INT,
-         | bigintField LONG,
-         | doubleField DOUBLE,
-         | stringField STRING,
-         | timestampField TIMESTAMP,
-         | decimalField DECIMAL(18,2),
-         | dateField DATE,
-         | charField CHAR(5),
-         | floatField FLOAT
-         | )
-         | $formatSyntax
-       """.stripMargin)
+    val df2 = spark.sparkContext.parallelize(1 to 2)
+      .map(x => ("chandler", BigDecimal.apply(x % 30), 3000))
+      .toDF("name", "age", "salary")
+    df2.write.format("avro").mode(SaveMode.Append).save("/home/root1/Projects/avrodata")
 
-    val path = s"$rootPath/examples/spark/src/main/resources/data.csv"
 
-    // scalastyle:off
-    spark.sql(
-      s"""
-         | LOAD DATA LOCAL INPATH '$path'
-         | INTO TABLE source
-         | OPTIONS('HEADER'='true', 'COMPLEX_DELIMITER_LEVEL_1'='#')
-       """.stripMargin)
-    // scalastyle:on
-
-    spark.sql(
-      s"""
-         | SELECT charField, stringField, intField
-         | FROM source
-         | WHERE stringfield = 'spark' AND decimalField > 40
-      """.stripMargin).show()
-
-    spark.sql(
-      s"""
-         | SELECT *
-         | FROM source WHERE length(stringField) = 5
-       """.stripMargin).show()
-
-    spark.sql(
-      s"""
-         | SELECT *
-         | FROM source WHERE date_format(dateField, "yyyy-MM-dd") = "2015-07-23"
-       """.stripMargin).show()
-
-    spark.sql("SELECT count(stringField) FROM source").show()
-
-    spark.sql(
-      s"""
-         | SELECT sum(intField), stringField
-         | FROM source
-         | GROUP BY stringField
-       """.stripMargin).show()
-
-    spark.sql(
-      s"""
-         | SELECT t1.*, t2.*
-         | FROM source t1, source t2
-         | WHERE t1.stringField = t2.stringField
-      """.stripMargin).show()
-
-    spark.sql(
-      s"""
-         | WITH t1 AS (
-         | SELECT * FROM source
-         | UNION ALL
-         | SELECT * FROM source
-         | )
-         | SELECT t1.*, t2.*
-         | FROM t1, source t2
-         | WHERE t1.stringField = t2.stringField
-      """.stripMargin).show()
-
-    spark.sql(
-      s"""
-         | SELECT *
-         | FROM source
-         | WHERE stringField = 'spark' and floatField > 2.8
-       """.stripMargin).show()
-
-    // Drop table
-    spark.sql("DROP TABLE IF EXISTS source")
+    val df3 = spark.sparkContext.parallelize(1 to 2)
+      .map(x => ("akash", BigDecimal.apply(x % 60), 3000))
+      .toDF("name", "age", "salary")
+    df3.write.format("avro").mode(SaveMode.Append).save("/home/root1/Projects/avrodata")
   }
 }

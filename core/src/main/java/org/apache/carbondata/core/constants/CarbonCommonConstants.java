@@ -22,7 +22,7 @@ import java.nio.charset.Charset;
 import org.apache.carbondata.common.annotations.InterfaceStability;
 import org.apache.carbondata.core.util.annotations.CarbonProperty;
 
-public final class CarbonCommonConstants {
+public final class  CarbonCommonConstants {
 
   private CarbonCommonConstants() {
   }
@@ -1214,6 +1214,17 @@ public final class CarbonCommonConstants {
       "carbon.enable.bad.record.handling.for.insert";
 
   public static final String CARBON_ENABLE_BAD_RECORD_HANDLING_FOR_INSERT_DEFAULT = "false";
+
+  /**
+   * This flag decides if table schema needs to change as per the incoming batch schema.
+   * If set to true, incoming schema will be validated with existing table schema.
+   * If the schema has evolved, the incoming batch cannot be ingested and
+   * job will simply fail.
+   */
+  @CarbonProperty
+  public static final String CARBON_ENABLE_SCHEMA_ENFORCEMENT = "carbon.enable.schema.enforcement";
+
+  public static final String CARBON_ENABLE_SCHEMA_ENFORCEMENT_DEFAULT = "true";
 
   //////////////////////////////////////////////////////////////////////////////////////////
   // Query parameter start here
@@ -2715,8 +2726,7 @@ public final class CarbonCommonConstants {
    * Schema registry url in case schema registry is selected as schema provider.
    */
   @CarbonProperty
-  public static final String CARBON_STREAMER_SCHEMA_REGISTRY_URL =
-      "carbon.streamer.schema.registry.url";
+  public static final String CARBON_STREAMER_SCHEMA_REGISTRY_URL = "schema.registry.url";
 
   // **************** kafka properties constants *********************
   /**
@@ -2766,6 +2776,21 @@ public final class CarbonCommonConstants {
 
   public static final String AVRO_SCHEMA = "carbon.streamer.avro.schema.deserialize";
 
+  /**
+   * Auto commit to kafka. If enabled, kafka will blindly commit the offsets to offset topic whether
+   * the respective operation is failed or not. So default we will keep it false.
+   */
+  public static final String KAFKA_ENABLE_AUTO_COMMIT = "enable.auto.commit";
+
+  public static final String KAFKA_ENABLE_AUTO_COMMIT_DEFAULT = "false";
+
+  /**
+   * This property is required if the consumer uses either the group management functionality by
+   * using subscribe(topic) or the Kafka-based offset management strategy.
+   */
+  @CarbonProperty
+  public static final String KAFKA_GROUP_ID = "group.id";
+
   // ***************************************************************
 
   /**
@@ -2811,9 +2836,6 @@ public final class CarbonCommonConstants {
   @CarbonProperty
   public static final String CARBON_STREAMER_MERGE_OPERATION_FIELD =
       "carbon.streamer.merge.operation.field";
-
-  // TODO: cross check for the field
-  public static final String CARBON_STREAMER_MERGE_OPERATION_FIELD_DEFAULT = "op_type";
 
   /**
    * Name of the field from source schema whose value can be used for picking the latest updates for
@@ -2876,5 +2898,12 @@ public final class CarbonCommonConstants {
 
   // TODO: check and then decide the default
   public static final String CARBON_STREAMER_BATCH_INTERVAL_DEFAULT = "10";
+
+  /**
+   * The metadata columns coming from the source stream data, which should not be included in the
+   * target data.
+   */
+  @CarbonProperty
+  public static final String CARBON_STREAMER_META_COLUMNS = "carbon.streamer.meta.columns";
 
 }

@@ -21,6 +21,9 @@ import org.apache.spark.streaming.StreamingContext
 
 import org.apache.carbondata.core.metadata.schema.table.CarbonTable
 
+/**
+ * Factory class to decide the Source class based on the Source Type.
+ */
 object SourceFactory extends Enumeration {
 
   type source = Value
@@ -44,7 +47,8 @@ object SourceFactory extends Enumeration {
         source = new AvroDFSSource(carbonTable)
         source.loadSchemaBasedOnConfiguredClass()
         source.getStream(ssc, sparkSession)
-      case other => throw new Exception(s"The source type $other is not yet supported")
+      case other => throw new CarbonDataStreamerException(s"The source type $other is not yet " +
+                                                          s"supported")
     }
   }
 }

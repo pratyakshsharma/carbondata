@@ -18,12 +18,12 @@ package org.apache.carbondata.streamer
 
 import com.beust.jcommander.Parameter
 
-import org.apache.carbondata.common.exceptions.sql.MalformedCarbonCommandException
 import org.apache.carbondata.core.constants.CarbonCommonConstants
 import org.apache.carbondata.core.util.CarbonProperties
 
 /**
  *
+ * The config class to parse the program arguments, validate and prepare the required configuration.
  */
 class CarbonStreamerConfig() extends Serializable {
 
@@ -85,12 +85,19 @@ class CarbonStreamerConfig() extends Serializable {
   @Parameter(names = Array("--value-deserializer"),
     description = "value deserializer for kafka. Mandatory for Kafka source.",
     required = false)
-  var valueDeserializer: String = CarbonCommonConstants.KAFKA_VALUE_DESERIALIZER
+  var valueDeserializer: String = CarbonCommonConstants.KAFKA_VALUE_DESERIALIZER_DEFAULT
 
   @Parameter(names = Array("--schema-registry-url"),
     description = "Schema registry url, in case schema registry is selected as schema provider.",
     required = false)
   var schemaRegistryURL: String = ""
+
+  @Parameter(names = Array("--group-id"),
+    description = "This property is required if the consumer uses either the group management " +
+                  "functionality by using subscribe(topic) or the Kafka-based offset management " +
+                  "strategy.",
+    required = false)
+  var groupId: String = ""
 
   // -------------------------------------------------------------------- //
 
@@ -118,12 +125,17 @@ class CarbonStreamerConfig() extends Serializable {
   var mergeOperationType: String = CarbonCommonConstants
     .CARBON_STREAMER_MERGE_OPERATION_TYPE_DEFAULT
 
-  @Parameter(names = Array("--merge-operation-field"),
+  @Parameter(names = Array("--delete-operation-field"),
     description = "Name of the field in source schema reflecting the IUD operation types on " +
                   "source data rows.",
-    required = true)
-  var mergeOperationField: String = CarbonCommonConstants
-    .CARBON_STREAMER_MERGE_OPERATION_FIELD_DEFAULT
+    required = false)
+  var deleteOperationField: String = ""
+
+  @Parameter(names = Array("--delete-field-value"),
+    description = "Name of the field in source schema reflecting the IUD operation types on " +
+                  "source data rows.",
+    required = false)
+  var deleteFieldValue: String = ""
 
   @Parameter(names = Array("--source-ordering-field"),
     description = "Name of the field from source schema whose value can be used for picking the " +
@@ -173,6 +185,13 @@ class CarbonStreamerConfig() extends Serializable {
     required = false)
   var batchInterval: String = CarbonCommonConstants.CARBON_STREAMER_BATCH_INTERVAL_DEFAULT
 
+  @Parameter(names = Array("--meta-columns"),
+    description = "Metadata columns added in source dataset. Please mention all the metadata" +
+                  " columns as comma separated values which should not be written to the " +
+                  "final carbondata table",
+    required = false)
+  var metaColumnsAdded: String = ""
+
   /**
    * This method set the configuration to carbonproperties which are passed as a arguments while
    * starting the streamer application
@@ -181,7 +200,7 @@ class CarbonStreamerConfig() extends Serializable {
     val carbonPropertiesInstance = CarbonProperties.getInstance()
 
     if (streamerConfig.targetTableName.equalsIgnoreCase("")) {
-      throw new MalformedCarbonCommandException(
+      throw new CarbonDataStreamerException(
         "Target carbondata table is not configured. Please configure and retry.")
     }
     carbonPropertiesInstance.addProperty(CarbonCommonConstants.CARBON_STREAMER_TABLE_NAME,
@@ -192,7 +211,7 @@ class CarbonStreamerConfig() extends Serializable {
       streamerConfig.sourceType)
     if (sourceType.equalsIgnoreCase(SourceFactory.DFS.toString) &&
         dfsSourceInputPth.equalsIgnoreCase("")) {
-      throw new MalformedCarbonCommandException(
+      throw new CarbonDataStreamerException(
         "The DFS source path to read and ingest data onto target carbondata table is must in case" +
         " of DFS source type.")
     }
@@ -203,13 +222,13 @@ class CarbonStreamerConfig() extends Serializable {
     if (schemaProviderType.equalsIgnoreCase(CarbonCommonConstants
       .CARBON_STREAMER_SCHEMA_PROVIDER_DEFAULT) &&
         streamerConfig.schemaRegistryURL.equalsIgnoreCase("")) {
-      throw new MalformedCarbonCommandException(
+      throw new CarbonDataStreamerException(
         "Schema registry URL is must when the schema provider is set as SchemaRegistry. Please " +
         "configure and retry.")
     } else if (schemaProviderType.equalsIgnoreCase(CarbonCommonConstants
       .CARBON_STREAMER_FILE_SCHEMA_PROVIDER) &&
                streamerConfig.sourceSchemaFilePath.equalsIgnoreCase("")) {
-      throw new MalformedCarbonCommandException(
+      throw new CarbonDataStreamerException(
         "Schema file path is must when the schema provider is set as FileSchema. Please " +
         "configure and retry.")
     }
@@ -222,12 +241,17 @@ class CarbonStreamerConfig() extends Serializable {
     carbonPropertiesInstance.addProperty(CarbonCommonConstants.CARBON_STREAMER_MERGE_OPERATION_TYPE,
       streamerConfig.mergeOperationType)
     carbonPropertiesInstance.addProperty(CarbonCommonConstants
-      .CARBON_STREAMER_MERGE_OPERATION_FIELD,
-      streamerConfig.mergeOperationField)
+      .CARBON_STREAMER_MERGE_OPERATION_FIELD, streamerConfig.deleteOperationField)
+    if ((deleteOperationField.equalsIgnoreCase("") && !deleteFieldValue.equalsIgnoreCase("")) ||
+        (!deleteOperationField.equalsIgnoreCase("") && deleteFieldValue.equalsIgnoreCase(""))) {
+      throw new CarbonDataStreamerException(
+        "Either both the values of --delete-operation-field and --delete-field-value should not " +
+        "be configured or both must be configured. Please configure and retry.")
+    }
     carbonPropertiesInstance.addProperty(CarbonCommonConstants
       .CARBON_STREAMER_SOURCE_ORDERING_FIELD, streamerConfig.sourceOrderingField)
     if (streamerConfig.keyColumn.equalsIgnoreCase("")) {
-      throw new MalformedCarbonCommandException(
+      throw new CarbonDataStreamerException(
         "The key column is must for the merge operation. Please configure and retry.")
     }
     carbonPropertiesInstance.addProperty(CarbonCommonConstants.CARBON_STREAMER_KEY_FIELD,
@@ -242,13 +266,13 @@ class CarbonStreamerConfig() extends Serializable {
       streamerConfig.kafkaInitialOffsetType)
     if (sourceType.equalsIgnoreCase(SourceFactory.KAFKA.toString) &&
         streamerConfig.inputKafkaTopic.equalsIgnoreCase("")) {
-      throw new MalformedCarbonCommandException(
+      throw new CarbonDataStreamerException(
         "Kafka topics is must to consume and ingest data onto target carbondata table, in case" +
         " of KAFKA source type.")
     }
     if (sourceType.equalsIgnoreCase(SourceFactory.KAFKA.toString) &&
         streamerConfig.kafkaBrokerList.equalsIgnoreCase("")) {
-      throw new MalformedCarbonCommandException(
+      throw new CarbonDataStreamerException(
         "Kafka broker list is must to consume and ingest data onto target carbondata table," +
         "in case of KAFKA source type.")
     }
@@ -260,7 +284,13 @@ class CarbonStreamerConfig() extends Serializable {
       streamerConfig.keyDeserializer)
     carbonPropertiesInstance.addProperty(CarbonCommonConstants.KAFKA_VALUE_DESERIALIZER,
       streamerConfig.valueDeserializer)
+    carbonPropertiesInstance.addProperty(CarbonCommonConstants.KAFKA_ENABLE_AUTO_COMMIT,
+      CarbonCommonConstants.KAFKA_ENABLE_AUTO_COMMIT_DEFAULT)
+    carbonPropertiesInstance.addProperty(CarbonCommonConstants.KAFKA_GROUP_ID,
+      streamerConfig.groupId)
     carbonPropertiesInstance.addProperty(CarbonCommonConstants.CARBON_STREAMER_BATCH_INTERVAL,
       streamerConfig.batchInterval)
+    carbonPropertiesInstance.addProperty(CarbonCommonConstants.CARBON_STREAMER_META_COLUMNS,
+      streamerConfig.metaColumnsAdded)
   }
 }

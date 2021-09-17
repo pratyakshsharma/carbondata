@@ -20,10 +20,6 @@ import scala.collection.JavaConverters._
 
 import org.apache.avro.generic.GenericRecord
 import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.avro.{AvroDeserializer, SchemaConverters}
-import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.encoders.RowEncoder
-import org.apache.spark.sql.types.StructType
 import org.apache.spark.streaming.StreamingContext
 import org.apache.spark.streaming.dstream.DStream
 import org.apache.spark.streaming.kafka010.ConsumerStrategies.Subscribe
@@ -34,14 +30,17 @@ import org.apache.carbondata.core.constants.CarbonCommonConstants
 import org.apache.carbondata.core.metadata.schema.table.CarbonTable
 import org.apache.carbondata.core.util.CarbonProperties
 
-class AvroKafkaSource(carbonTable: CarbonTable) extends Source {
+/**
+ * This class handles of preparing the Dstream and merging the data onto target carbondata table
+ * for the kafka Source containing avro data.
+ * @param carbonTable target carbondata table.
+ */
+class AvroKafkaSource(carbonTable: CarbonTable) extends Source with Serializable {
 
   override
-  def getStream(ssc: StreamingContext,
+  def getStream(
+      ssc: StreamingContext,
       sparkSession: SparkSession): CarbonDStream = {
-
-    // TODO: check if we need to disable "enable.auto.commit" -> (false: java.lang.Boolean)
-
     // separate out the non carbon properties and prepare the kafka param
     val kafkaParams = CarbonProperties.getInstance()
       .getAllPropertiesInstance
@@ -59,25 +58,6 @@ class AvroKafkaSource(carbonTable: CarbonTable) extends Source {
 
   override
   def prepareDFAndMerge(inputStream: CarbonDStream): Unit = {
-    val sparkDataTypes = SchemaConverters.toSqlType(schema).dataType.asInstanceOf[StructType]
-//    val converter = new ReaderSchemaBasedKafkaDeserializer()
-//    val encoder = RowEncoder.apply(sparkDataTypes).resolveAndBind()
-
-    inputStream.inputDStream.asInstanceOf[DStream[GenericRecord]].foreachRDD { rdd =>
-      val rowRDD = rdd.map { row =>
-        genericRecordToRow(row, sparkDataTypes)
-      }
-      val targetDs = inputStream.sparkSession
-        .read
-        .format("carbondata")
-        .load(carbonTable.getTablePath)
-      val sourceDS = inputStream.sparkSession.createDataFrame(rowRDD, sparkDataTypes)
-      // TODO: get src schema and send for schema evolution or enforcement and send required info
-      // TODO: get the targetataset after schema evolution
-      inputStream.performMergeOperation(targetDs,
-        sourceDS,
-        keyColumn,
-        mergeOperationType)
-    }
+    prepareDSForAvroSourceAndMerge(inputStream, carbonTable)
   }
 }

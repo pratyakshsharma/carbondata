@@ -16,12 +16,7 @@
  */
 package org.apache.carbondata.streamer
 
-import org.apache.avro.generic.GenericRecord
-import org.apache.spark.sql.{CarbonEnv, SparkSession}
-import org.apache.spark.sql.avro.{AvroDeserializer, SchemaConverters}
-import org.apache.spark.sql.catalyst.InternalRow
-import org.apache.spark.sql.catalyst.encoders.RowEncoder
-import org.apache.spark.sql.types.StructType
+import org.apache.spark.sql.SparkSession
 import org.apache.spark.streaming.StreamingContext
 import org.apache.spark.streaming.dstream.DStream
 
@@ -30,7 +25,12 @@ import org.apache.carbondata.core.datastore.impl.FileFactory
 import org.apache.carbondata.core.metadata.schema.table.CarbonTable
 import org.apache.carbondata.core.util.CarbonProperties
 
-class AvroDFSSource(carbonTable: CarbonTable) extends Source {
+/**
+ * This class handles of preparing the Dstream and merging the data onto target carbondata table
+ * for the DFS Source containing avro data.
+ * @param carbonTable target carbondata table.
+ */
+class AvroDFSSource(carbonTable: CarbonTable) extends Source with Serializable {
 
   override
   def getStream(
@@ -44,24 +44,6 @@ class AvroDFSSource(carbonTable: CarbonTable) extends Source {
 
   override
   def prepareDFAndMerge(inputStream: CarbonDStream): Unit = {
-    val sparkDataTypes = SchemaConverters.toSqlType(schema).dataType.asInstanceOf[StructType]
-//    val converter = new ReaderSchemaBasedKafkaDeserializer(schema)
-//    val encoder = RowEncoder.apply(sparkDataTypes).resolveAndBind()
-    // TODO: handle separately with fil schema as reader shema in deserializer
-    inputStream.inputDStream.asInstanceOf[DStream[GenericRecord]].foreachRDD { rdd =>
-      val rows = rdd.map { row =>
-        genericRecordToRow(row, sparkDataTypes)
-      }
-      val targetDs = inputStream.sparkSession
-        .read
-        .format("carbondata")
-        .load(carbonTable.getTablePath)
-      val sourceDS = inputStream.sparkSession.createDataFrame(rows, sparkDataTypes)
-      // TODO: get src schema and send for schema evolution or enforcement and send required info
-      inputStream.performMergeOperation(targetDs,
-        sourceDS,
-        keyColumn,
-        mergeOperationType)
-    }
+    prepareDSForAvroSourceAndMerge(inputStream, carbonTable)
   }
 }

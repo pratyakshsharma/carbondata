@@ -22,12 +22,18 @@ import org.apache.spark.sql.catalyst.TableIdentifier
 import org.apache.spark.sql.execution.strategy.CarbonPlanHelper
 import org.apache.spark.streaming.{Seconds, StreamingContext}
 
-import org.apache.carbondata.common.exceptions.sql.MalformedCarbonCommandException
+import org.apache.carbondata.common.logging.LogServiceFactory
 import org.apache.carbondata.core.constants.CarbonCommonConstants
 import org.apache.carbondata.core.util.CarbonProperties
 import org.apache.carbondata.core.util.path.CarbonTablePath
 
+/**
+ * Carbondata streamer, which is a spark streaming application to pull data from different
+ * sources and merge onto target cabondata table.
+ */
 object CarbonDataStreamer {
+
+  val LOGGER = LogServiceFactory.getLogService(this.getClass.getName)
 
   def createConfig(streamerConfig: CarbonStreamerConfig,
       args: Array[String]): Unit = {
@@ -46,6 +52,10 @@ object CarbonDataStreamer {
       .master(streamerConfigs.sparkMaster)
       .appName("CarbonData Streamer tool")
       .config("spark.sql.extensions", "org.apache.spark.sql.CarbonExtensions")
+      .config("spark.sql.warehouse.dir", "/home/root1/Projects/carbondata/test-warehouse")
+      .config("javax.jdo.option.ConnectionURL",
+        "jdbc:derby:;databaseName=/home/root1/Documents/carbondata/test-warehouse" +
+        "/metastore_db;create=true")
       .enableHiveSupport()
       .getOrCreate()
     CarbonEnv.getInstance(spark)
@@ -53,6 +63,12 @@ object CarbonDataStreamer {
     SparkSession.setActiveSession(spark)
     SparkSession.setDefaultSession(spark)
 
+//    spark.sql("drop table if exists test")
+//    spark.sql("create table test(name string, age int, salary double) stored as carbondata")
+//    spark.sql("insert into test select 'akash1',26,2000")
+//    spark.sql("insert into test select 'new',26,3000")
+//    spark.sql("alter table test compact 'major'")
+//    spark.sql("select * from test").show()
     val batchDuration = CarbonProperties.getInstance()
       .getProperty(CarbonCommonConstants.CARBON_STREAMER_BATCH_INTERVAL,
         CarbonCommonConstants.CARBON_STREAMER_BATCH_INTERVAL_DEFAULT).toLong
@@ -84,18 +100,10 @@ object CarbonDataStreamer {
     val segmentProperties = CarbonProperties.getInstance().getProperty(
       CarbonCommonConstants.CARBON_INPUT_SEGMENTS + dbAndTb, "")
     if (!(segmentProperties.equals("") || segmentProperties.trim.equals("*"))) {
-      throw new MalformedCarbonCommandException(
+      throw new CarbonDataStreamerException(
         s"carbon.input.segments. $dbAndTb should not be set for table during merge operation. " +
         s"Please reset the property to carbon.input.segments.dbAndTb=*")
     }
-
-    // prepare the target dataset based on target carbondata table.
-    val targetDs = spark.read.format("carbondata").load(targetCarbonDataTable.getTablePath)
-    val keyColumn = CarbonProperties.getInstance()
-      .getProperty(CarbonCommonConstants.CARBON_STREAMER_KEY_FIELD)
-    val mergeOperationType = CarbonProperties.getInstance()
-      .getProperty(CarbonCommonConstants.CARBON_STREAMER_MERGE_OPERATION_TYPE,
-        CarbonCommonConstants.CARBON_STREAMER_MERGE_OPERATION_TYPE_DEFAULT)
 
     // get the source Dstream based on source type
     val sourceType = CarbonProperties.getInstance()
@@ -103,12 +111,18 @@ object CarbonDataStreamer {
         CarbonCommonConstants.CARBON_STREAMER_SOURCE_TYPE_DEFAULT)
     val sourceCarbonDStream = SourceFactory.apply(sourceType, ssc, spark, targetCarbonDataTable)
 
-
     // Perform merge on source stream
     SourceFactory.source.prepareDFAndMerge(sourceCarbonDStream)
 
-    ssc.start()
-    ssc.awaitTermination()
-    ssc.stop()
+    // TODO: make use of continuous streamer
+    try {
+      ssc.start()
+      ssc.awaitTermination()
+    } catch {
+      case ex: Exception =>
+        LOGGER.error("streaming failed. Stopping the streaming application gracefully.", ex)
+        ssc.stop(stopSparkContext = true, stopGracefully = true)
+    }
+
   }
 }

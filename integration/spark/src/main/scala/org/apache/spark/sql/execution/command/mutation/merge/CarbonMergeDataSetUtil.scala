@@ -16,21 +16,30 @@
  */
 package org.apache.spark.sql.execution.command.mutation.merge
 
+import java.nio.charset.Charset
 import java.util
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable
 
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.carbondata.execution.datasources.CarbonSparkDataSourceUtil
 import org.apache.spark.sql.{CarbonDatasourceHadoopRelation, Dataset, Row, SparkSession}
-import org.apache.spark.sql.catalyst.TableIdentifier
+import org.apache.spark.sql.catalyst.{CarbonParserUtil, TableIdentifier}
 import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.expressions.EqualTo
 import org.apache.spark.sql.execution.CastExpressionOptimization
+import org.apache.spark.sql.execution.command.{AlterTableAddColumnsModel, AlterTableDataTypeChangeModel, AlterTableDropColumnModel}
+import org.apache.spark.sql.execution.command.schema.{CarbonAlterTableAddColumnCommand, CarbonAlterTableColRenameDataTypeChangeCommand, CarbonAlterTableDropColumnCommand}
+import org.apache.spark.sql.functions.expr
 import org.apache.spark.sql.optimizer.CarbonFilters
-import org.apache.spark.sql.types.DateType
+import org.apache.spark.sql.parser.CarbonSpark2SqlParser
+import org.apache.spark.sql.types.{DateType, DecimalType, StructField}
 
 import org.apache.carbondata.common.exceptions.sql.MalformedCarbonCommandException
+import org.apache.carbondata.common.logging.LogServiceFactory
 import org.apache.carbondata.core.constants.CarbonCommonConstants
+import org.apache.carbondata.core.constants.CarbonCommonConstants.DEFAULT_CHARSET
 import org.apache.carbondata.core.index.{IndexChooser, IndexInputFormat, IndexStoreManager, IndexUtil}
 import org.apache.carbondata.core.indexstore.PartitionSpec
 import org.apache.carbondata.core.indexstore.blockletindex.BlockletIndexRowIndexes
@@ -41,7 +50,7 @@ import org.apache.carbondata.core.mutate.{CdcVO, FilePathMinMaxVO}
 import org.apache.carbondata.core.range.BlockMinMaxTree
 import org.apache.carbondata.core.statusmanager.SegmentStatusManager
 import org.apache.carbondata.core.util.{ByteUtil, CarbonProperties, CarbonUtil, DataTypeUtil}
-import org.apache.carbondata.core.util.comparator.SerializableComparator
+import org.apache.carbondata.core.util.comparator.{Comparator, SerializableComparator}
 import org.apache.carbondata.indexserver.IndexServer
 import org.apache.carbondata.spark.util.CarbonSparkUtil
 
@@ -49,6 +58,8 @@ import org.apache.carbondata.spark.util.CarbonSparkUtil
  * The utility class for Merge operations
  */
 object CarbonMergeDataSetUtil {
+
+  val LOGGER = LogServiceFactory.getLogService(this.getClass.getName)
 
   /**
    * This method reads the splits and make (blockPath, (min, max)) tuple to to min max pruning of
@@ -462,5 +473,369 @@ object CarbonMergeDataSetUtil {
       }
       columnMinMaxInBlocklet.asScala
     }
+  }
+
+  /**
+   * This method verifies source and target schemas for the following:
+   * If additional columns are present in source schema as compared to target, simply ignore them.
+   * If some columns are missing in source schema as compared to target schema, exception is thrown.
+   * If data type of some column differs in source and target schemas, exception is thrown.
+   * If source schema has multiple columns whose names differ only in case sensitivity, exception
+   * is thrown.
+   * @param targetDs target carbondata table
+   * @param srcDs source/incoming data
+   */
+  def verifySourceAndTargetSchemas(targetDs: Dataset[Row], srcDs: Dataset[Row]): Unit = {
+    LOGGER.info("schema enforcement is enabled. Source and target schemas will be verified")
+    // get the source and target dataset schema
+    val sourceSchema = srcDs.schema
+    val targetSchema = targetDs.schema
+
+    targetSchema.fields.foreach(tgtField => {
+      // check if some field is missing in source schema
+      if (!sourceSchema.fields.map(_.name.toLowerCase).contains(tgtField.name.toLowerCase)) {
+        LOGGER.error(s"source schema does not contain field: ${ tgtField.name }")
+        throw new MalformedCarbonCommandException(s"source schema does not contain " +
+                                                  s"field: ${ tgtField.name }")
+      }
+
+      // check if data type got modified for some column
+      val sourceField = sourceSchema.fields
+        .find(f => f.name.equalsIgnoreCase(tgtField.name.toLowerCase))
+      if (!sourceField.get.dataType.equals(tgtField.dataType)) {
+        LOGGER.error(s"source schema has different data type for field: ${
+          tgtField.name
+        }, source type: ${ sourceField.get.dataType }, target type: ${ tgtField.dataType }")
+        throw new MalformedCarbonCommandException(s"source schema has different data type " +
+                                                  s"for field: ${ tgtField.name }")
+      }
+    })
+
+    // check if some additional column got added in source schema
+    if (sourceSchema.fields.length > targetSchema.fields.length) {
+      val additionalSourceFields = sourceSchema.fields.map(_.name.toLowerCase)
+        .filterNot(srcField => {
+          targetSchema.fields.map(_.name.toLowerCase).contains(srcField)
+        })
+      LOGGER.warn(s"source schema contains additional fields which are not present in " +
+                  s"target schema: ${ additionalSourceFields.mkString(",") }")
+    }
+
+    // check if source schema has fields whose names only differ in case sensitivity
+    val similarFields = sourceSchema.fields.map(_.name.toLowerCase).groupBy(a => identity(a)).map {
+      case (str, times) => (str, times.length)
+    }.toList.filter(e => e._2 > 1).map(_._1)
+    if (similarFields.nonEmpty) {
+      LOGGER.error(s"source schema has similar fields which differ only in case sensitivity: " +
+                   s"${ similarFields.mkString(",") }")
+      throw new MalformedCarbonCommandException(s"source schema has similar fields which differ" +
+                                                s" only in case sensitivity: ${
+                                                  similarFields.mkString(",")
+                                                }")
+    }
+  }
+
+  /**
+   * This method takes care of handling schema evolution scenarios for CarbonStreamer class.
+   * Currently only addition of columns is supported.
+   * @param targetDs target dataset whose schema needs to be modified, if applicable
+   * @param srcDs incoming dataset
+   * @param sparkSession SparkSession
+   */
+  def handleSchemaEvolutionForCarbonStreamer(targetDs: Dataset[Row], srcDs: Dataset[Row],
+                                             sparkSession: SparkSession): Unit = {
+    // read the property here
+    val isSchemaEnforcementEnabled = CarbonProperties.getInstance()
+      .getProperty(CarbonCommonConstants.CARBON_ENABLE_SCHEMA_ENFORCEMENT,
+        CarbonCommonConstants.CARBON_ENABLE_SCHEMA_ENFORCEMENT_DEFAULT).toBoolean
+    if (isSchemaEnforcementEnabled) {
+      verifySourceAndTargetSchemas(targetDs, srcDs)
+    } else {
+      // These meta columns should be removed before actually writing the data
+      val metaColumnsString = CarbonProperties.getInstance()
+        .getProperty(CarbonCommonConstants.CARBON_STREAMER_META_COLUMNS, "")
+      val metaCols = metaColumnsString.split(",").map(_.trim)
+      val srcDsWithoutMeta = if (metaCols.length > 0) srcDs.drop(metaCols: _*)
+      else srcDs
+      handleSchemaEvolution(targetDs, srcDsWithoutMeta, sparkSession, isStreamerInvolved = true)
+    }
+  }
+
+  def verifyBackwardsCompatibility(
+      targetDs: Dataset[Row],
+      srcDs: Dataset[Row]): Unit = {
+    val sourceSchema = srcDs.schema
+    val targetSchema = targetDs.schema
+
+    targetSchema.fields.foreach(tgtField => {
+      // check if some field is missing in source schema
+      if (!sourceSchema.fields.map(_.name.toLowerCase).contains(tgtField.name.toLowerCase)) {
+        LOGGER.error(s"source schema does not contain field: ${ tgtField.name }")
+        throw new MalformedCarbonCommandException(s"source schema does not contain " +
+                                                  s"field: ${ tgtField.name }")
+      }
+
+      // check if data type got modified for some column
+      val sourceField = sourceSchema.fields
+        .find(f => f.name.equalsIgnoreCase(tgtField.name.toLowerCase))
+      if (!sourceField.get.dataType.equals(tgtField.dataType)) {
+        LOGGER.error(s"source schema has different data type for field: ${
+          tgtField.name
+        }, source type: ${ sourceField.get.dataType }, target type: ${ tgtField.dataType }")
+        throw new MalformedCarbonCommandException(s"source schema has different data type " +
+                                                  s"for field: ${ tgtField.name }")
+      }
+    })
+  }
+
+  /**
+   * The method takes care of following schema evolution cases:
+   * Addition of a new column in source schema which is not present in target
+   * Deletion of a column in source schema which is present in target
+   * Data type changes for an existing column.
+   * The method does not take care of column renames and table renames
+   * @param targetDs existing target dataset
+   * @param srcDs incoming source dataset
+   * @return new target schema to write the incoming batch with
+   */
+  def handleSchemaEvolution(
+      targetDs: Dataset[Row],
+      srcDs: Dataset[Row],
+      sparkSession: SparkSession,
+      isStreamerInvolved: Boolean = false): Unit = {
+
+    if (isStreamerInvolved) {
+      verifyBackwardsCompatibility(targetDs, srcDs)
+    }
+    val sourceSchema = srcDs.schema
+    val targetSchema = targetDs.schema
+
+    // check if any column got added in source
+    val addedColumns = sourceSchema.fields.filterNot(f => targetSchema.fields.contains(f))
+    if (addedColumns.nonEmpty) {
+      handleAddColumnScenario(targetDs, addedColumns.toSeq, sparkSession)
+    }
+
+    // check if any column got deleted from source
+    val deletedColumns = targetSchema.fields.map(_.name.toLowerCase)
+      .filterNot(f => {
+        sourceSchema.fields.map(_.name.toLowerCase).contains(f)
+      })
+    if (deletedColumns.nonEmpty) {
+      handleDeleteColumnScenario(targetDs, deletedColumns.toList, sparkSession)
+    }
+
+    val modifiedColumns = targetSchema.fields.filter(tgtField => {
+      val sourceField = sourceSchema.fields.find(f => f.name.equalsIgnoreCase(tgtField.name))
+      !sourceField.get.dataType.equals(tgtField.dataType)
+    })
+
+    if (modifiedColumns.nonEmpty) {
+      handleDataTypeChangeScenario(targetDs, modifiedColumns.toList, sparkSession)
+    }
+  }
+
+  /**
+   * This method calls CarbonAlterTableAddColumnCommand for adding new columns
+   * @param targetDs target dataset whose schema needs to be modified
+   * @param colsToAdd new columns to be added
+   * @param sparkSession SparkSession
+   */
+  def handleAddColumnScenario(targetDs: Dataset[Row], colsToAdd: Seq[StructField],
+                              sparkSession: SparkSession): Unit = {
+    val relations = CarbonSparkUtil.collectCarbonRelation(targetDs.logicalPlan)
+    val targetCarbonTable = relations.head.carbonRelation.carbonTable
+    val fields = new CarbonSpark2SqlParser().getFields(colsToAdd)
+    val tableModel = CarbonParserUtil.prepareTableModel(ifNotExistPresent = false,
+      CarbonParserUtil.convertDbNameToLowerCase(Option(targetCarbonTable.getDatabaseName)),
+      targetCarbonTable.getTableName.toLowerCase,
+      fields.map(CarbonParserUtil.convertFieldNamesToLowercase),
+      Seq.empty,
+      scala.collection.mutable.Map.empty[String, String],
+      None,
+      isAlterFlow = true)
+//    targetCarbonTable.getAllDimensions.asScala.map(f => Field(column = f.getColName,
+//      dataType = Some(f.getDataType.getName), name = Option(f.getColName),
+//      children = None, ))
+    val alterTableAddColumnsModel = AlterTableAddColumnsModel(
+      CarbonParserUtil.convertDbNameToLowerCase(Option(targetCarbonTable.getDatabaseName)),
+      targetCarbonTable.getTableName.toLowerCase,
+      Map.empty[String, String],
+      tableModel.dimCols,
+      tableModel.msrCols,
+      tableModel.highCardinalityDims.getOrElse(Seq.empty))
+    CarbonAlterTableAddColumnCommand(alterTableAddColumnsModel).run(sparkSession)
+  }
+
+  /**
+   * This method calls CarbonAlterTableDropColumnCommand for deleting columns
+   * @param targetDs target dataset whose schema needs to be modified
+   * @param colsToDrop columns to be dropped from carbondata table
+   * @param sparkSession SparkSession
+   */
+  def handleDeleteColumnScenario(targetDs: Dataset[Row], colsToDrop: List[String],
+                                 sparkSession: SparkSession): Unit = {
+    val relations = CarbonSparkUtil.collectCarbonRelation(targetDs.logicalPlan)
+    val targetCarbonTable = relations.head.carbonRelation.carbonTable
+    val alterTableDropColumnModel = AlterTableDropColumnModel(
+      CarbonParserUtil.convertDbNameToLowerCase(Option(targetCarbonTable.getDatabaseName)),
+      targetCarbonTable.getTableName.toLowerCase,
+      colsToDrop.map(_.toLowerCase))
+    CarbonAlterTableDropColumnCommand(alterTableDropColumnModel).run(sparkSession)
+  }
+
+  /**
+   * This method calls CarbonAlterTableColRenameDataTypeChangeCommand for handling data type changes
+   * @param targetDs target dataset whose schema needs to be modified
+   * @param modifiedCols columns with data type changes
+   * @param sparkSession SparkSession
+   */
+  def handleDataTypeChangeScenario(targetDs: Dataset[Row], modifiedCols: List[StructField],
+                                   sparkSession: SparkSession): Unit = {
+    val relations = CarbonSparkUtil.collectCarbonRelation(targetDs.logicalPlan)
+    val targetCarbonTable = relations.head.carbonRelation.carbonTable
+
+    // need to call the command one by one for each modified column
+    modifiedCols.foreach(col => {
+      val values = col.dataType match {
+        case d: DecimalType => Some(List((d.precision, d.scale)))
+        case _ => None
+      }
+      val dataTypeInfo = CarbonParserUtil.parseColumn(col.name, col.dataType, values)
+
+      val alterTableColRenameAndDataTypeChangeModel =
+        AlterTableDataTypeChangeModel(
+          dataTypeInfo,
+          Option(targetCarbonTable.getDatabaseName.toLowerCase),
+          targetCarbonTable.getTableName.toLowerCase,
+          col.name.toLowerCase,
+          col.name.toLowerCase,
+          isColumnRename = false,
+          Option.empty)
+
+      CarbonAlterTableColRenameDataTypeChangeCommand(
+        alterTableColRenameAndDataTypeChangeModel
+      ).run(sparkSession)
+    })
+  }
+
+  def deduplicateBeforeWriting(
+      srcDs: Dataset[Row],
+      targetDs: Dataset[Row],
+      sparkSession: SparkSession,
+      srcAlias: String,
+      targetAlias: String,
+      keyColumn: String,
+      orderingField: String,
+      targetCarbonTable: CarbonTable): Dataset[Row] = {
+    val properties = CarbonProperties.getInstance()
+    val filterDupes = properties
+      .getProperty(CarbonCommonConstants.CARBON_STREAMER_INSERT_DEDUPLICATE).toBoolean
+    val combineBeforeUpsert = properties
+      .getProperty(CarbonCommonConstants.CARBON_STREAMER_UPSERT_DEDUPLICATE).toBoolean
+    var dedupedDataset: Dataset[Row] = srcDs
+    if (combineBeforeUpsert) {
+      dedupedDataset = deduplicateAgainstIncomingDataset(srcDs, sparkSession, srcAlias, keyColumn,
+        orderingField, targetCarbonTable)
+    }
+    if (filterDupes) {
+      dedupedDataset = deduplicateAgainstExistingDataset(dedupedDataset, targetDs,
+        srcAlias, targetAlias, keyColumn)
+    }
+    dedupedDataset.show()
+    dedupedDataset
+  }
+
+  def deduplicateAgainstIncomingDataset(
+      srcDs: Dataset[Row],
+      sparkSession: SparkSession,
+      srcAlias: String,
+      keyColumn: String,
+      orderingField: String,
+      table: CarbonTable): Dataset[Row] = {
+    val schema = srcDs.schema
+//    val orderingCarbonColumn = table.getColumnByName(orderingField)
+    val carbonKeyColumn = table.getColumnByName(keyColumn)
+    val dataType = srcDs.schema.fields.find(f => f.name.equalsIgnoreCase(keyColumn)).get.dataType
+    val orderingDataType = srcDs.schema.fields.find(f => f.name.equalsIgnoreCase(orderingField))
+      .get.dataType
+    val keyColumnDataType = CarbonSparkDataSourceUtil.convertSparkToCarbonDataType(dataType)
+    val orderingFieldDataType = CarbonSparkDataSourceUtil.convertSparkToCarbonDataType(
+      orderingDataType)
+    val isPrimitiveAndNotDate = DataTypeUtil.isPrimitiveColumn(orderingFieldDataType) &&
+                                (orderingFieldDataType != DataTypes.DATE)
+    val comparator = if (isPrimitiveAndNotDate) {
+      Comparator.getComparator(orderingFieldDataType)
+    } else if (orderingFieldDataType == DataTypes.STRING) {
+      null
+    } else {
+      Comparator.getComparatorByDataTypeForMeasure(orderingFieldDataType)
+    }
+    val rdd = srcDs.rdd
+    val dedupedRDD: RDD[Row] = rdd.map{row =>
+      val index = row.fieldIndex(keyColumn)
+      val rowKey = if (!row.isNullAt(index)) {
+        row.getAs(index).toString
+      } else {
+        val value: Long = 0
+        if (carbonKeyColumn.isDimension) {
+          if (isPrimitiveAndNotDate) {
+            CarbonCommonConstants.EMPTY_BYTE_ARRAY
+          } else {
+            CarbonCommonConstants.MEMBER_DEFAULT_VAL_ARRAY
+          }
+        } else {
+          val nullValueForMeasure = if ((keyColumnDataType eq DataTypes.BOOLEAN) ||
+                                        (keyColumnDataType eq DataTypes.BYTE)) {
+            value.toByte
+          } else if (keyColumnDataType eq DataTypes.SHORT) {
+            value.toShort
+          } else if (keyColumnDataType eq DataTypes.INT) {
+            value.toInt
+          } else if ((keyColumnDataType eq DataTypes.LONG) ||
+                     (keyColumnDataType eq DataTypes.TIMESTAMP)) {
+            value
+          } else if (keyColumnDataType eq DataTypes.DOUBLE) {
+            0d
+          } else if (keyColumnDataType eq DataTypes.FLOAT) {
+            0f
+          } else if (DataTypes.isDecimal(keyColumnDataType)) {
+            value
+          }
+          CarbonUtil.getValueAsBytes(keyColumnDataType, nullValueForMeasure)
+        }
+      }
+      (rowKey, row)
+    }.reduceByKey{(row1, row2) =>
+      val orderingValue1 = row1.getAs(orderingField).toString
+      val orderingValue2 = row2.getAs(orderingField).toString
+      if (orderingFieldDataType.equals(DataTypes.STRING)) {
+        if (ByteUtil.UnsafeComparer
+              .INSTANCE
+          // TODO: add null check
+              .compareTo(orderingValue1.toString.getBytes(Charset.forName(DEFAULT_CHARSET)),
+                orderingValue2.toString.getBytes(Charset.forName(DEFAULT_CHARSET))) >= 0) {
+          row1
+        } else {
+          row2
+        }
+      } else {
+        if (comparator.compare(orderingValue1, orderingValue2) >= 0) row1 else {
+          row2
+        }
+      }
+    }.map(_._2)
+    sparkSession.createDataFrame(dedupedRDD, schema).alias(srcAlias)
+  }
+
+  def deduplicateAgainstExistingDataset(
+      srcDs: Dataset[Row],
+      targetDs: Dataset[Row],
+      srcAlias: String,
+      targetAlias: String,
+      keyColumn: String
+  ) : Dataset[Row] = {
+    srcDs.join(targetDs,
+      expr(s"$srcAlias.$keyColumn = $targetAlias.$keyColumn"), "left_anti")
   }
 }

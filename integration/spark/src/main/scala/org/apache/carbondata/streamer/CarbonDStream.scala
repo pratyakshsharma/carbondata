@@ -21,10 +21,24 @@ import org.apache.spark.sql.CarbonSession._
 import org.apache.spark.sql.execution.command.mutation.merge.MergeOperationType
 import org.apache.spark.streaming.dstream.DStream
 
+/**
+ * Wrapper class to hold the spark's DStream object as Dstream can be of different types based on
+ * the different input sources like text, avro, kafka etc.
+ * @param sparkSession Spark Session
+ * @param inputDStream Spark's DStream object
+ */
 case class CarbonDStream(
     @transient sparkSession: SparkSession,
     inputDStream: DStream[Any]) extends Serializable {
 
+  /**
+   * Performs the merge operation onto target carbondata table based on the operation type.
+   * @param targetDsOri target dataset of carbondata table.
+   * @param srcDS source dataset prepared from different sources like kafka, avro, json etc.
+   * @param keyColumn the join column based on which merge is performed.
+   * @param mergeOperationType Merge operation type to perform, can be UPSERT, UPDATE, INSERT and
+   *                           DELETE.
+   */
   def performMergeOperation(
       targetDsOri: Dataset[Row],
       srcDS: Dataset[Row],
